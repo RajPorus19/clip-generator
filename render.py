@@ -233,10 +233,45 @@ def _word_index_at(
     return None
 
 
+def _subtitle_y(block_h: int, image_rect: tuple[int, int, int, int] | None) -> int:
+    """Compute a subtitle Y position that avoids overlapping the image rect.
+
+    Tries to place the subtitle below the image first, then above.
+    Falls back to config.SUBTITLE_Y if no image is active or neither slot fits.
+
+    Args:
+        block_h:    Height of the subtitle block in pixels.
+        image_rect: (x, y, w, h) of the active image overlay, or None.
+
+    Returns:
+        Y pixel coordinate for the top of the subtitle block.
+    """
+    if image_rect is None:
+        return config.SUBTITLE_Y
+
+    _, img_y, _, img_h = image_rect
+    frame_h = config.RESOLUTION[1]
+    margin = config.GRAPH_PADDING
+
+    img_bottom = img_y + img_h
+
+    # Prefer below the image
+    if img_bottom + margin + block_h <= frame_h - margin:
+        return img_bottom + margin
+
+    # Fall back to above the image
+    if img_y - margin - block_h >= margin:
+        return img_y - margin - block_h
+
+    # Image fills the frame — place at bottom edge (unavoidable overlap)
+    return frame_h - block_h - margin
+
+
 def make_subtitle_clip(
     line_text: str,
     timestamps: list[dict],
     duration: float,
+    image_rect: tuple[int, int, int, int] | None = None,
 ) -> VideoClip:
     """Generate a karaoke-style subtitle VideoClip for a dialogue line.
 
@@ -244,13 +279,17 @@ def make_subtitle_clip(
     SUBTITLE_HIGHLIGHT_COLOR; all others use SUBTITLE_COLOR.
     A semi-transparent rounded rectangle is drawn behind the text block.
 
+    The subtitle is always rendered on the topmost layer. When image_rect is
+    provided the subtitle Y is shifted to avoid visually overlapping the image.
+
     Args:
         line_text:   The full dialogue line string.
         timestamps:  Word timestamp list from align.py.
         duration:    Duration of the subtitle clip in seconds.
+        image_rect:  (x, y, w, h) of any active image overlay, or None.
 
     Returns:
-        A MoviePy VideoClip (RGBA) positioned at SUBTITLE_Y.
+        A MoviePy VideoClip (RGBA) positioned to avoid the image area.
     """
     font = _get_font(config.SUBTITLE_FONT_SIZE)
     line_words = line_text.split()
@@ -314,9 +353,10 @@ def make_subtitle_clip(
 
     clip = VideoClip(make_frame, duration=duration, ismask=False)
 
-    # Center horizontally, place at SUBTITLE_Y
+    # Center horizontally; Y avoids the active image rect if one is provided
     x = (w - block_w) // 2
-    clip = clip.with_position((x, config.SUBTITLE_Y))
+    y = _subtitle_y(int(block_h), image_rect)
+    clip = clip.with_position((x, y))
     return clip
 
 
@@ -514,10 +554,13 @@ def render(script_path: str, output_path: str | None = None) -> None:
                     prog,
                 )
 
-        # ── 9. Composite (z-order: bg → characters → subtitles → images) ──────
+        # ── 9. Composite (z-order: bg → characters → images → subtitles) ───────
+        # Subtitles are always topmost so they're never hidden, but they are
+        # positioned to avoid visually overlapping any active image (see
+        # _subtitle_y() and make_subtitle_clip()).
         prog.info("Compositing all video layers...")
         final_video = CompositeVideoClip(
-            [bg_clip] + character_layers + subtitle_layers + image_layers,
+            [bg_clip] + character_layers + image_layers + subtitle_layers,
             size=config.RESOLUTION,
         )
 

@@ -113,12 +113,14 @@ Enforced in `render.py` — layers are kept in **separate z-buckets** and always
 |---|--------|------|
 | 1 | Background | Always at the bottom — everything else can cover it |
 | 2 | Character sprites | Above background — **exactly one character visible at a time** (the currently speaking one); each sprite clip lasts exactly as long as the character's audio line |
-| 3 | Subtitles | Above characters and background — **never covers a displayed image overlay** |
-| 4 | Image overlays | Topmost — covers everything including characters and subtitles |
+| 3 | Image overlays | Above characters — covers background and sprites |
+| 4 | Subtitles | **Always topmost** — never hidden by anything, including images |
 
-**Implementation:** `character_layers`, `subtitle_layers`, and `image_layers` are accumulated separately during the compositing loop and concatenated in z-order when building the final `CompositeVideoClip`:
+**Subtitle position avoidance** — subtitles are on top but must not visually overlap an active image. `_subtitle_y(block_h, image_rect)` in `render.py` shifts the subtitle below the image (preferred) or above it if below doesn't fit. `make_subtitle_clip` accepts an optional `image_rect: tuple[int, int, int, int]` for this purpose.
+
+**Implementation:** `character_layers`, `image_layers`, and `subtitle_layers` are accumulated separately during the compositing loop and concatenated in z-order:
 ```python
-[bg_clip] + character_layers + subtitle_layers + image_layers
+[bg_clip] + character_layers + image_layers + subtitle_layers
 ```
 
 **Never flatten these into a single list** — doing so would break the z-ordering guarantee.

@@ -140,12 +140,12 @@ The final frame is built by stacking four z-ordered layers. These rules are alwa
 |-------|------|-----------|
 | 1 — Background | Gameplay footage | Nothing |
 | 2 — Characters | Sprite of the speaking character | Background only |
-| 3 — Subtitles | Karaoke word highlight | Background, characters |
-| 4 — Image overlays | Charts / pictures | Everything, including subtitles |
+| 3 — Image overlays | Charts / pictures | Background, characters |
+| 4 — Subtitles | Karaoke word highlight | Everything — always visible on top |
 
 **One character at a time** — each character sprite clip is active only for the exact duration of that character's audio line. Two character sprites are never visible simultaneously.
 
-**Subtitles never cover images** — even if they share the same timestamp (which the current script format doesn't produce, but is enforced structurally in the compositor).
+**Subtitles avoid images** — subtitles are always the topmost layer and are never hidden. When an image is active, the subtitle is repositioned to sit below the image (preferred) or above it if there isn't enough space below. They visually avoid the image rather than covering it.
 
 ## Configuration
 
