@@ -60,6 +60,8 @@ def _c(text: str, *codes: str) -> str:
 # Ordered pipeline stages — used to derive percent complete
 PIPELINE_STAGES = [
     "PARSING",
+    "VALIDATING",
+    "GENERATING",
     "ALIGNING",
     "BACKGROUND",
     "COMPOSITING",
@@ -69,6 +71,8 @@ PIPELINE_STAGES = [
 
 _STAGE_ICONS = {
     "PARSING":      "📄",
+    "VALIDATING":   "🔍",
+    "GENERATING":   "🔊",
     "ALIGNING":     "🎙 ",
     "BACKGROUND":   "🎮",
     "COMPOSITING":  "🎬",

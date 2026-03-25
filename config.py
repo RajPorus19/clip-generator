@@ -39,5 +39,12 @@ BACKGROUNDS_DIR = "assets/backgrounds/"
 CHARACTERS_DIR = "assets/characters/"
 AUDIO_DIR = "assets/audio/"
 
+# ── Audio ─────────────────────────────────────────────────────────────────────
+AUDIO_EXT = "wav"           # file extension for audio files (wav when using Voicebox)
+
 # ── Whisper ───────────────────────────────────────────────────────────────────
 WHISPER_MODEL = "base"              # tiny | base | small | medium | large
+
+# ── Voicebox TTS ──────────────────────────────────────────────────────────────
+VOICEBOX_URL = "http://localhost:8000"   # base URL of the local Voicebox server
+# Voice profiles are matched to characters by name — no manual mapping needed.

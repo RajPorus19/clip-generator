@@ -18,6 +18,25 @@ from typing import Any
 import config
 
 
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def resolve_asset_path(file_rel: str) -> Path | None:
+    """Resolve an asset path to an existing file.
+
+    Tries the path as given first, then relative to config.ASSETS_DIR.
+
+    Args:
+        file_rel: Path as written in the script (e.g. "pictures/graph.png").
+
+    Returns:
+        The first existing Path, or None if neither candidate exists.
+    """
+    for candidate in (Path(file_rel), Path(config.ASSETS_DIR) / file_rel):
+        if candidate.exists():
+            return candidate
+    return None
+
+
 # ── Regex patterns ────────────────────────────────────────────────────────────
 
 _RE_DIALOGUE = re.compile(
@@ -91,16 +110,8 @@ def _parse_image_event(
     file_rel = match.group("file")
     duration = float(match.group("duration"))
 
-    full_path = Path(config.ASSETS_DIR) / file_rel
-    if not full_path.exists():
-        # Also try the path as given (already includes assets/)
-        alt_path = Path(file_rel)
-        if alt_path.exists():
-            file_rel = str(alt_path)
-        else:
-            print(
-                f"[parse] WARNING line {lineno}: image file not found — {full_path}"
-            )
+    if resolve_asset_path(file_rel) is None:
+        print(f"[parse] WARNING line {lineno}: image file not found — {file_rel}")
 
     return {"type": "image", "file": file_rel, "duration": duration}
 
@@ -119,7 +130,7 @@ def _parse_dialogue_event(
     index = char_counters[character]
 
     audio_path = str(
-        Path(config.AUDIO_DIR) / f"{character}_{index:03d}.mp3"
+        Path(config.AUDIO_DIR) / f"{character}_{index:03d}.{config.AUDIO_EXT}"
     )
 
     if not Path(audio_path).exists():

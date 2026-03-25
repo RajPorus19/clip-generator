@@ -24,9 +24,11 @@ from moviepy import (
 from moviepy.audio.AudioClip import CompositeAudioClip
 
 import config
-from parse import parse_script
+from parse import parse_script, resolve_asset_path
 from align import ensure_alignments
 from progress import Progress
+from validate import validate, print_report
+import tts
 
 
 # ── Font singleton ────────────────────────────────────────────────────────────
@@ -117,22 +119,6 @@ def load_background(total_duration: float) -> VideoFileClip:
 
 # ── Character sprite ──────────────────────────────────────────────────────────
 
-def load_character_sprite(character: str) -> Image.Image | None:
-    """Load a character PNG with transparency.
-
-    Args:
-        character: Character name (e.g. "peter").
-
-    Returns:
-        RGBA PIL Image, or None if the file is not found.
-    """
-    path = Path(config.CHARACTERS_DIR) / f"{character}.png"
-    if not path.exists():
-        print(f"[render] WARNING: character sprite not found — {path}")
-        return None
-    return Image.open(path).convert("RGBA")
-
-
 def make_character_clip(
     character: str,
     duration: float,
@@ -151,23 +137,20 @@ def make_character_clip(
     Returns:
         An ImageClip, or None if the sprite image is missing.
     """
-    img = load_character_sprite(character)
-    if img is None:
+    path = Path(config.CHARACTERS_DIR) / f"{character}.png"
+    if not path.exists():
+        print(f"[render] WARNING: character sprite not found — {path}")
         return None
 
+    img = Image.open(path).convert("RGBA")
     target_w = int(config.RESOLUTION[0] * config.CHARACTER_SCALE)
-    aspect = img.height / img.width
-    target_h = int(target_w * aspect)
+    target_h = int(target_w * (img.height / img.width))
     img = img.resize((target_w, target_h), Image.LANCZOS)
 
-    # Convert RGBA PIL → numpy array for MoviePy
-    arr = np.array(img)
-
-    clip = (
-        ImageClip(arr, duration=duration)
+    return (
+        ImageClip(np.array(img), duration=duration)
         .with_position((x_pos, config.CHARACTER_ZONE_Y))
     )
-    return clip
 
 
 # ── Subtitle rendering ────────────────────────────────────────────────────────
@@ -306,8 +289,9 @@ def make_subtitle_clip(
         draw = ImageDraw.Draw(img)
 
         # Semi-transparent background
-        bg_color = (0, 0, 0, config.SUBTITLE_BG_ALPHA)
-        _draw_rounded_rect(draw, (0, 0, block_w, block_h), radius=20, fill=bg_color)
+        draw.rounded_rectangle(
+            (0, 0, block_w, block_h), radius=20, fill=(0, 0, 0, config.SUBTITLE_BG_ALPHA)
+        )
 
         # Render each word
         for row_i, (word_row, index_row) in enumerate(
@@ -336,23 +320,6 @@ def make_subtitle_clip(
     return clip
 
 
-def _draw_rounded_rect(
-    draw: ImageDraw.ImageDraw,
-    bbox: tuple[int, int, int, int],
-    radius: int,
-    fill: tuple[int, int, int, int],
-) -> None:
-    """Draw a rounded rectangle on a Pillow ImageDraw canvas.
-
-    Args:
-        draw:   ImageDraw instance.
-        bbox:   (x0, y0, x1, y1) bounding box.
-        radius: Corner radius in pixels.
-        fill:   RGBA fill color tuple.
-    """
-    draw.rounded_rectangle(bbox, radius=radius, fill=fill)
-
-
 # ── Image overlay ─────────────────────────────────────────────────────────────
 
 def make_image_overlay_clip(file_rel: str, duration: float) -> ImageClip | None:
@@ -365,17 +332,7 @@ def make_image_overlay_clip(file_rel: str, duration: float) -> ImageClip | None:
     Returns:
         A positioned ImageClip, or None if the file is not found.
     """
-    # Try multiple path resolutions
-    candidates = [
-        Path(file_rel),
-        Path(config.ASSETS_DIR) / file_rel,
-    ]
-    img_path = None
-    for c in candidates:
-        if c.exists():
-            img_path = c
-            break
-
+    img_path = resolve_asset_path(file_rel)
     if img_path is None:
         print(f"[render] WARNING: image overlay not found — {file_rel}")
         return None
@@ -460,29 +417,76 @@ def render(script_path: str, output_path: str | None = None) -> None:
         image_count    = sum(1 for e in timeline if e["type"] == "image")
         prog.info(f"{len(timeline)} events  ({dialogue_count} dialogue, {image_count} image)")
 
-        # ── 2. Align (Whisper) ────────────────────────────────────────────────
+        # ── 2. Validate assets ────────────────────────────────────────────────
+        prog.stage("VALIDATING", script_path)
+        report = validate(script_path)
+
+        for w in report.warnings:
+            prog.warn(w)
+
+        blocking = report.blocking_errors
+        if blocking:
+            for e in blocking:
+                prog.warn(e)
+            prog.error(f"{len(blocking)} blocking error(s) — see warnings above")
+            return
+
+        prog.info(
+            f"Voicebox: {'running' if report.voicebox_running else 'not running'}  |  "
+            f"{'All audio present' if not report.missing_audio else f'{len(report.missing_audio)} audio file(s) missing'}"
+        )
+
+        # ── 3. Auto-generate missing audio ────────────────────────────────────
+        if report.generatable_audio:
+            # Build name→profile lookup from already-fetched profiles (no extra HTTP calls)
+            profile_by_name = {
+                p.get("name", "").lower(): p for p in report.voicebox_profiles
+            }
+            prog.stage(
+                "GENERATING",
+                f"{len(report.generatable_audio)} audio file(s)",
+                step_total=len(report.generatable_audio),
+            )
+            for i, item in enumerate(report.generatable_audio, start=1):
+                prog.step(i, len(report.generatable_audio), Path(item["path"]).name)
+                profile = profile_by_name.get(item["character"].lower())
+                if profile is None:
+                    prog.warn(f"No Voicebox profile named '{item['character']}' — skipping")
+                    continue
+                try:
+                    tts.generate(profile["id"], item["line"], item["path"])
+                    prog.info(f"Generated: {item['path']}")
+                except Exception as exc:
+                    prog.warn(f"TTS failed for {item['path']}: {exc}")
+
+        # ── 4. Align (Whisper) ────────────────────────────────────────────────
         prog.stage("ALIGNING", f"{dialogue_count} audio file(s)", step_total=dialogue_count)
         timestamps_map = ensure_alignments(timeline, prog)
 
-        # ── 3. Compute total duration ─────────────────────────────────────────
+        # ── 5. Compute total duration ─────────────────────────────────────────
         total_duration = _compute_total_duration(timeline)
         prog.info(f"Total video duration: {total_duration:.2f}s")
 
-        # ── 4. Load background ────────────────────────────────────────────────
+        # ── 6. Load background ────────────────────────────────────────────────
         prog.stage("BACKGROUND", config.BACKGROUNDS_DIR)
         bg_clip = load_background(total_duration)
         prog.info(f"Loaded and cropped to {config.RESOLUTION[0]}×{config.RESOLUTION[1]}")
 
-        # ── 5. Speaker position map ───────────────────────────────────────────
+        # ── 7. Speaker position map ───────────────────────────────────────────
         speaker_positions = _build_speaker_positions(timeline)
 
-        # ── 6. Build all layers ───────────────────────────────────────────────
+        # ── 8. Build all layers ───────────────────────────────────────────────
+        # Layers are kept in separate buckets so the final composite always
+        # respects the z-order rules regardless of script order:
+        #   background → characters → subtitles → image overlays
         prog.stage(
             "COMPOSITING",
             f"{len(timeline)} events",
             step_total=len(timeline),
         )
-        video_layers: list[Any] = [bg_clip]
+        character_layers: list[Any] = []
+        subtitle_layers: list[Any] = []
+        image_layers: list[Any] = []
         audio_clips: list[Any] = []
         time_cursor = 0.0
 
@@ -495,7 +499,8 @@ def render(script_path: str, output_path: str | None = None) -> None:
                     time_cursor,
                     timestamps_map,
                     speaker_positions,
-                    video_layers,
+                    character_layers,
+                    subtitle_layers,
                     audio_clips,
                     prog,
                 )
@@ -505,24 +510,24 @@ def render(script_path: str, output_path: str | None = None) -> None:
                 time_cursor = _process_image_event(
                     event,
                     time_cursor,
-                    video_layers,
+                    image_layers,
                     prog,
                 )
 
-        # ── 7. Composite ──────────────────────────────────────────────────────
+        # ── 9. Composite (z-order: bg → characters → subtitles → images) ──────
         prog.info("Compositing all video layers...")
         final_video = CompositeVideoClip(
-            video_layers,
+            [bg_clip] + character_layers + subtitle_layers + image_layers,
             size=config.RESOLUTION,
         )
 
-        # ── 8. Attach audio ───────────────────────────────────────────────────
+        # ── 10. Attach audio ──────────────────────────────────────────────────
         if audio_clips:
             prog.info("Merging audio tracks...")
             merged_audio = CompositeAudioClip(audio_clips)
             final_video = final_video.with_audio(merged_audio)
 
-        # ── 9. Export ─────────────────────────────────────────────────────────
+        # ── 11. Export ────────────────────────────────────────────────────────
         Path(output_path).parent.mkdir(parents=True, exist_ok=True)
         prog.stage("EXPORTING", output_path)
 
@@ -553,18 +558,24 @@ def _process_dialogue_event(
     time_cursor: float,
     timestamps_map: dict,
     speaker_positions: dict,
-    video_layers: list,
+    character_layers: list,
+    subtitle_layers: list,
     audio_clips: list,
     prog: "Progress",
 ) -> float:
     """Add character sprite, subtitle, and audio clips for a dialogue event.
+
+    Character clip goes into character_layers (z=2).
+    Subtitle clip goes into subtitle_layers (z=3).
+    Only the speaking character is shown — one at a time, never two at once.
 
     Args:
         event:             Dialogue event dict.
         time_cursor:       Current time position in seconds.
         timestamps_map:    Audio path → word timestamp list.
         speaker_positions: Character name → X position.
-        video_layers:      List to append new VideoClip objects to.
+        character_layers:  Z-bucket for character sprites.
+        subtitle_layers:   Z-bucket for subtitle clips.
         audio_clips:       List to append new AudioFileClip objects to.
         prog:              Progress tracker instance.
 
@@ -583,18 +594,18 @@ def _process_dialogue_event(
     duration = audio_clip.duration
     audio_clips.append(audio_clip)
 
-    # Character sprite
+    # Character sprite — visible only for the duration of this line
     x_pos = speaker_positions.get(character, config.CHARACTER_X_LEFT)
     char_clip = make_character_clip(character, duration, x_pos)
     if char_clip is not None:
-        video_layers.append(char_clip.with_start(time_cursor))
+        character_layers.append(char_clip.with_start(time_cursor))
     else:
         prog.warn(f"No sprite for '{character}' — skipping sprite layer")
 
-    # Karaoke subtitles
+    # Karaoke subtitles — above characters, below image overlays
     word_ts = timestamps_map.get(audio_path, [])
     subtitle_clip = make_subtitle_clip(line_text, word_ts, duration)
-    video_layers.append(subtitle_clip.with_start(time_cursor))
+    subtitle_layers.append(subtitle_clip.with_start(time_cursor))
 
     prog.info(
         f"[{character}] {line_text[:50]!r}  "
@@ -607,15 +618,18 @@ def _process_dialogue_event(
 def _process_image_event(
     event: dict,
     time_cursor: float,
-    video_layers: list,
+    image_layers: list,
     prog: "Progress",
 ) -> float:
     """Add an image overlay clip for an image event.
 
+    Image goes into image_layers (z=4 — topmost), covering everything
+    including subtitles and characters.
+
     Args:
         event:        Image event dict.
         time_cursor:  Current time position in seconds.
-        video_layers: List to append new VideoClip objects to.
+        image_layers: Z-bucket for image overlay clips.
         prog:         Progress tracker instance.
 
     Returns:
@@ -626,7 +640,7 @@ def _process_image_event(
 
     overlay = make_image_overlay_clip(file_rel, duration)
     if overlay is not None:
-        video_layers.append(overlay.with_start(time_cursor))
+        image_layers.append(overlay.with_start(time_cursor))
     else:
         prog.warn(f"Image overlay not found — {file_rel}")
 
@@ -665,10 +679,21 @@ def _compute_total_duration(timeline: list[dict]) -> float:
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: python render.py scripts/episode1.md [output/episode1.mp4]")
-        sys.exit(1)
+    import argparse
 
-    script_arg = sys.argv[1]
-    output_arg = sys.argv[2] if len(sys.argv) > 2 else None
-    render(script_arg, output_arg)
+    ap = argparse.ArgumentParser(description="Brainrot video generator")
+    ap.add_argument("script", help="Path to .md script file")
+    ap.add_argument("output", nargs="?", default=None, help="Output MP4 path (optional)")
+    ap.add_argument(
+        "--check",
+        action="store_true",
+        help="Validate assets and exit without rendering",
+    )
+    args = ap.parse_args()
+
+    if args.check:
+        report = validate(args.script)
+        print_report(report, args.script)
+        sys.exit(1 if report.blocking_errors else 0)
+    else:
+        render(args.script, args.output)

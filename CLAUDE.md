@@ -105,6 +105,24 @@ Colors are automatically disabled when stdout is not a TTY (e.g. CI logs).
 - **Missing assets** — missing audio, sprite, or image files produce a warning log but do not crash; the clip is silently skipped so the rest of the video still renders
 - **Font fallback** — if `assets/fonts/bold.ttf` is not found, Pillow's built-in bitmap font is used automatically; it is small and low quality, so always supply a real TTF for production
 
+## Compositing layer order
+
+Enforced in `render.py` — layers are kept in **separate z-buckets** and always composited in this order, regardless of script order:
+
+| Z | Bucket | Rule |
+|---|--------|------|
+| 1 | Background | Always at the bottom — everything else can cover it |
+| 2 | Character sprites | Above background — **exactly one character visible at a time** (the currently speaking one); each sprite clip lasts exactly as long as the character's audio line |
+| 3 | Subtitles | Above characters and background — **never covers a displayed image overlay** |
+| 4 | Image overlays | Topmost — covers everything including characters and subtitles |
+
+**Implementation:** `character_layers`, `subtitle_layers`, and `image_layers` are accumulated separately during the compositing loop and concatenated in z-order when building the final `CompositeVideoClip`:
+```python
+[bg_clip] + character_layers + subtitle_layers + image_layers
+```
+
+**Never flatten these into a single list** — doing so would break the z-ordering guarantee.
+
 ## Image overlay sizing rules
 
 Enforced in `make_image_overlay_clip` in `render.py`:
