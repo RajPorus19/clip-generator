@@ -1,4 +1,4 @@
-# Brainrot Generator
+# Clip Generator
 
 Generates vertical short-form MP4 videos (1080×1920, 9:16, 30 fps) for TikTok, YouTube Shorts, and Instagram Reels from simple markdown script files. Characters talk over gameplay footage with karaoke-style subtitles.
 
