@@ -18,8 +18,8 @@ from moviepy import (
     AudioFileClip,
     CompositeVideoClip,
     ImageClip,
-    VideoFileClip,
     VideoClip,
+    VideoFileClip,
 )
 from moviepy.audio.AudioClip import CompositeAudioClip
 
@@ -108,11 +108,15 @@ def load_background(total_duration: float) -> VideoFileClip:
     y1 = (new_h - target_h) // 2
     clip = clip.cropped(x1=x1, y1=y1, x2=x1 + target_w, y2=y1 + target_h)
 
-    # Loop if background is shorter than video
+    # Pick a random start point so each render uses a different portion.
+    # If the background is shorter than needed, loop it first then pick randomly.
     if clip.duration < total_duration:
-        clip = clip.loop(duration=total_duration)
-    else:
-        clip = clip.subclipped(0, total_duration)
+        clip = clip.loop(duration=clip.duration * (int(total_duration / clip.duration) + 2))
+
+    max_start = clip.duration - total_duration
+    start = random.uniform(0, max_start)
+    clip = clip.subclipped(start, start + total_duration)
+    print(f"[render] Background start: {start:.1f}s")
 
     return clip
 
@@ -155,116 +159,6 @@ def make_character_clip(
 
 # ── Subtitle rendering ────────────────────────────────────────────────────────
 
-def _wrap_words(
-    words: list[str],
-    font: ImageFont.FreeTypeFont | ImageFont.ImageFont,
-    max_width: int,
-    dummy_draw: ImageDraw.ImageDraw,
-) -> list[list[str]]:
-    """Wrap a flat list of words into lines that fit within max_width pixels.
-
-    Args:
-        words:     Ordered list of word strings.
-        font:      Pillow font to measure with.
-        max_width: Maximum line width in pixels.
-        dummy_draw: An ImageDraw instance for measurement.
-
-    Returns:
-        List of lines, each line being a list of word strings.
-    """
-    lines: list[list[str]] = []
-    current_line: list[str] = []
-    current_width = 0
-
-    for word in words:
-        word_w = dummy_draw.textbbox((0, 0), word + " ", font=font)[2]
-        if current_line and current_width + word_w > max_width:
-            lines.append(current_line)
-            current_line = [word]
-            current_width = word_w
-        else:
-            current_line.append(word)
-            current_width += word_w
-
-    if current_line:
-        lines.append(current_line)
-
-    return lines
-
-
-def _word_index_at(
-    timestamps: list[dict],
-    t: float,
-    line_words: list[str],
-) -> int | None:
-    """Return the index (into line_words) of the word active at time t.
-
-    Matches by lowercased, stripped word text.
-
-    Args:
-        timestamps: List of {"word", "start", "end"} dicts.
-        t:          Current time in seconds relative to audio start.
-        line_words: Ordered words from the dialogue line.
-
-    Returns:
-        Index of the active word, or None if no word is active.
-    """
-    active_ts = None
-    for ts in timestamps:
-        if ts["start"] <= t <= ts["end"]:
-            active_ts = ts
-            break
-
-    if active_ts is None:
-        # Find the last word whose start is before t (keep highlighting it)
-        for ts in reversed(timestamps):
-            if ts["start"] <= t:
-                active_ts = ts
-                break
-
-    if active_ts is None:
-        return None
-
-    target = active_ts["word"].strip().lower().strip(".,!?;:")
-    for i, w in enumerate(line_words):
-        if w.strip().lower().strip(".,!?;:") == target:
-            return i
-
-    return None
-
-
-def _subtitle_y(block_h: int, image_rect: tuple[int, int, int, int] | None) -> int:
-    """Compute a subtitle Y position that avoids overlapping the image rect.
-
-    Tries to place the subtitle below the image first, then above.
-    Falls back to config.SUBTITLE_Y if no image is active or neither slot fits.
-
-    Args:
-        block_h:    Height of the subtitle block in pixels.
-        image_rect: (x, y, w, h) of the active image overlay, or None.
-
-    Returns:
-        Y pixel coordinate for the top of the subtitle block.
-    """
-    if image_rect is None:
-        return config.SUBTITLE_Y
-
-    _, img_y, _, img_h = image_rect
-    frame_h = config.RESOLUTION[1]
-    margin = config.GRAPH_PADDING
-
-    img_bottom = img_y + img_h
-
-    # Prefer below the image
-    if img_bottom + margin + block_h <= frame_h - margin:
-        return img_bottom + margin
-
-    # Fall back to above the image
-    if img_y - margin - block_h >= margin:
-        return img_y - margin - block_h
-
-    # Image fills the frame — place at bottom edge (unavoidable overlap)
-    return frame_h - block_h - margin
 
 
 def make_subtitle_clip(
@@ -273,91 +167,97 @@ def make_subtitle_clip(
     duration: float,
     image_rect: tuple[int, int, int, int] | None = None,
 ) -> VideoClip:
-    """Generate a karaoke-style subtitle VideoClip for a dialogue line.
+    """Karaoke-style subtitles: 3 words at a time, white with the spoken word in yellow.
 
-    For every frame, the currently active word is rendered in
-    SUBTITLE_HIGHLIGHT_COLOR; all others use SUBTITLE_COLOR.
-    A semi-transparent rounded rectangle is drawn behind the text block.
-
-    The subtitle is always rendered on the topmost layer. When image_rect is
-    provided the subtitle Y is shifted to avoid visually overlapping the image.
-
-    Args:
-        line_text:   The full dialogue line string.
-        timestamps:  Word timestamp list from align.py.
-        duration:    Duration of the subtitle clip in seconds.
-        image_rect:  (x, y, w, h) of any active image overlay, or None.
-
-    Returns:
-        A MoviePy VideoClip (RGBA) positioned to avoid the image area.
+    Words are grouped into chunks of SUBTITLE_WORDS_PER_CHUNK. The visible chunk
+    advances as the dialogue progresses. The currently spoken word is highlighted
+    in yellow; all others in the chunk are white. Black outline on all words.
     """
     font = _get_font(config.SUBTITLE_FONT_SIZE)
+    frame_w = config.RESOLUTION[0]
     line_words = line_text.split()
-    w = config.RESOLUTION[0]
-    pad = config.SUBTITLE_BG_PADDING
-    line_spacing = config.SUBTITLE_LINE_SPACING
+    n = len(line_words)
+    chunk_size = config.SUBTITLE_WORDS_PER_CHUNK
 
-    # ── Pre-compute layout (constant across all frames) ─────────────────────
-    dummy_img = Image.new("RGBA", (1, 1))
-    dummy_draw = ImageDraw.Draw(dummy_img)
+    # Word start times by position
+    word_starts = [
+        timestamps[i]["start"] if i < len(timestamps) else float("inf")
+        for i in range(n)
+    ]
 
-    wrapped_lines = _wrap_words(
-        line_words, font, config.SUBTITLE_MAX_WIDTH, dummy_draw
-    )
+    # Chunks: [[w0,w1,w2], [w3,w4,w5], ...]
+    chunks = [line_words[i:i + chunk_size] for i in range(0, n, chunk_size)]
 
-    # Measure a sample character for line height
+    dummy_draw = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
     _, _, _, line_h = dummy_draw.textbbox((0, 0), "Ag", font=font)
-    line_h += line_spacing
+    line_h += config.SUBTITLE_STROKE_WIDTH * 2 + 4   # room for stroke
 
-    total_text_h = line_h * len(wrapped_lines)
-    block_w = config.SUBTITLE_MAX_WIDTH + pad * 2
-    block_h = total_text_h + pad * 2
+    max_w = frame_w - 40   # 20px padding each side
 
-    # Flat index offset: wrapped_lines[i][j] → flat word index
-    flat_offsets: list[list[int]] = []
-    idx = 0
-    for wl in wrapped_lines:
-        flat_offsets.append(list(range(idx, idx + len(wl))))
-        idx += len(wl)
+    def _word_w(word: str) -> int:
+        return dummy_draw.textbbox((0, 0), word + " ", font=font)[2]
+
+    def _wrap(words: list[str]) -> list[list[str]]:
+        """Wrap a list of words into lines that fit within max_w."""
+        lines: list[list[str]] = []
+        current: list[str] = []
+        cur_w = 0
+        for word in words:
+            w = _word_w(word)
+            if current and cur_w + w > max_w:
+                lines.append(current)
+                current = [word]
+                cur_w = w
+            else:
+                current.append(word)
+                cur_w += w
+        if current:
+            lines.append(current)
+        return lines
+
+    # Pre-compute wrapped layout for every chunk so canvas height is fixed
+    chunk_layouts = [_wrap(chunk) for chunk in chunks]
+    max_lines = max(len(layout) for layout in chunk_layouts)
+    canvas_h = line_h * max_lines
 
     def make_frame(t: float) -> np.ndarray:
-        """Render one subtitle frame at time t."""
-        active_idx = _word_index_at(timestamps, t, line_words)
+        active_idx = None
+        for i, start in enumerate(word_starts):
+            if start <= t:
+                active_idx = i
 
-        img = Image.new("RGBA", (block_w, block_h), (0, 0, 0, 0))
+        chunk_idx = (active_idx // chunk_size) if active_idx is not None else 0
+        chunk_idx = min(chunk_idx, len(chunks) - 1)
+        base_idx = chunk_idx * chunk_size
+        layout = chunk_layouts[chunk_idx]
+
+        img = Image.new("RGBA", (frame_w, canvas_h), (0, 0, 0, 0))
         draw = ImageDraw.Draw(img)
 
-        # Semi-transparent background
-        draw.rounded_rectangle(
-            (0, 0, block_w, block_h), radius=20, fill=(0, 0, 0, config.SUBTITLE_BG_ALPHA)
-        )
-
-        # Render each word
-        for row_i, (word_row, index_row) in enumerate(
-            zip(wrapped_lines, flat_offsets)
-        ):
-            x_cursor = pad
-            y = pad + row_i * line_h
-
-            for word, flat_i in zip(word_row, index_row):
+        flat_j = 0
+        for row_i, row_words in enumerate(layout):
+            row_widths = [_word_w(w) for w in row_words]
+            x = (frame_w - sum(row_widths)) // 2
+            y = row_i * line_h
+            for word, w in zip(row_words, row_widths):
+                global_idx = base_idx + flat_j
                 color = (
                     config.SUBTITLE_HIGHLIGHT_COLOR + (255,)
-                    if flat_i == active_idx
+                    if global_idx == active_idx
                     else config.SUBTITLE_COLOR + (255,)
                 )
-                draw.text((x_cursor, y), word, font=font, fill=color)
-                word_w = draw.textbbox((0, 0), word + " ", font=font)[2]
-                x_cursor += word_w
+                draw.text(
+                    (x, y), word, font=font,
+                    fill=color,
+                    stroke_width=config.SUBTITLE_STROKE_WIDTH,
+                    stroke_fill=(0, 0, 0, 255),
+                )
+                x += w
+                flat_j += 1
 
         return np.array(img)
 
-    clip = VideoClip(make_frame, duration=duration, ismask=False)
-
-    # Center horizontally; Y avoids the active image rect if one is provided
-    x = (w - block_w) // 2
-    y = _subtitle_y(int(block_h), image_rect)
-    clip = clip.with_position((x, y))
-    return clip
+    return VideoClip(make_frame, duration=duration).with_position((0, config.SUBTITLE_Y))
 
 
 # ── Image overlay ─────────────────────────────────────────────────────────────
@@ -529,6 +429,10 @@ def render(script_path: str, output_path: str | None = None) -> None:
         image_layers: list[Any] = []
         audio_clips: list[Any] = []
         time_cursor = 0.0
+        # Collect image events as (start_time, max_duration, file_rel) —
+        # effective durations are capped later so a new image always
+        # replaces the previous one immediately, even mid-display.
+        pending_images: list[tuple[float, float, str]] = []
 
         for event_i, event in enumerate(timeline, start=1):
             if event["type"] == "dialogue":
@@ -547,12 +451,24 @@ def render(script_path: str, output_path: str | None = None) -> None:
             elif event["type"] == "image":
                 label = f"[img] {event['file']}  {event['duration']}s"
                 prog.step(event_i, len(timeline), label)
-                time_cursor = _process_image_event(
-                    event,
-                    time_cursor,
-                    image_layers,
-                    prog,
-                )
+                pending_images.append((time_cursor, event["duration"], event["file"]))
+                prog.info(f"[img] {event['file']}  @ {time_cursor:.2f}s  (up to {event['duration']}s)")
+
+        # Build image clips with capped durations: each image ends at the
+        # earlier of (start + max_duration) or the moment the next image starts.
+        for i, (start, max_dur, file_rel) in enumerate(pending_images):
+            if i + 1 < len(pending_images):
+                next_start = pending_images[i + 1][0]
+                effective_dur = min(max_dur, next_start - start)
+            else:
+                effective_dur = min(max_dur, time_cursor - start)
+            effective_dur = max(effective_dur, 0.0)
+
+            overlay = make_image_overlay_clip(file_rel, effective_dur)
+            if overlay is not None:
+                image_layers.append(overlay.with_start(start))
+            else:
+                prog.warn(f"Image overlay not found — {file_rel}")
 
         # ── 9. Composite (z-order: bg → characters → images → subtitles) ───────
         # Subtitles are always topmost so they're never hidden, but they are
@@ -633,7 +549,20 @@ def _process_dialogue_event(
         prog.warn(f"SKIP dialogue — audio not found: {audio_path}")
         return time_cursor
 
-    audio_clip = AudioFileClip(audio_path).with_start(time_cursor)
+    raw_audio = AudioFileClip(audio_path)
+
+    # Trim trailing silence: use last Whisper word end + small tail buffer
+    # so dialogue clips back-to-back with no dead air between lines.
+    word_ts = timestamps_map.get(audio_path, [])
+    if word_ts:
+        trimmed = min(
+            word_ts[-1]["end"] + config.AUDIO_TAIL_PADDING,
+            raw_audio.duration,
+        )
+        audio_clip = raw_audio.subclipped(0, trimmed).with_start(time_cursor)
+    else:
+        audio_clip = raw_audio.with_start(time_cursor)
+
     duration = audio_clip.duration
     audio_clips.append(audio_clip)
 
@@ -644,9 +573,6 @@ def _process_dialogue_event(
         character_layers.append(char_clip.with_start(time_cursor))
     else:
         prog.warn(f"No sprite for '{character}' — skipping sprite layer")
-
-    # Karaoke subtitles — above characters, below image overlays
-    word_ts = timestamps_map.get(audio_path, [])
     subtitle_clip = make_subtitle_clip(line_text, word_ts, duration)
     subtitle_layers.append(subtitle_clip.with_start(time_cursor))
 
@@ -657,42 +583,6 @@ def _process_dialogue_event(
     )
     return time_cursor + duration
 
-
-def _process_image_event(
-    event: dict,
-    time_cursor: float,
-    image_layers: list,
-    prog: "Progress",
-) -> float:
-    """Add an image overlay clip for an image event.
-
-    Image goes into image_layers (z=4 — topmost), covering everything
-    including subtitles and characters.
-
-    Args:
-        event:        Image event dict.
-        time_cursor:  Current time position in seconds.
-        image_layers: Z-bucket for image overlay clips.
-        prog:         Progress tracker instance.
-
-    Returns:
-        Updated time_cursor (advanced by image duration).
-    """
-    file_rel = event["file"]
-    duration = event["duration"]
-
-    overlay = make_image_overlay_clip(file_rel, duration)
-    if overlay is not None:
-        image_layers.append(overlay.with_start(time_cursor))
-    else:
-        prog.warn(f"Image overlay not found — {file_rel}")
-
-    prog.info(
-        f"[img] {file_rel}  "
-        f"@ {time_cursor:.2f}s – {time_cursor + duration:.2f}s  "
-        f"({duration:.1f}s)"
-    )
-    return time_cursor + duration
 
 
 def _compute_total_duration(timeline: list[dict]) -> float:
@@ -714,8 +604,6 @@ def _compute_total_duration(timeline: list[dict]) -> float:
                 ac = AudioFileClip(audio_path)
                 total += ac.duration
                 ac.close()
-        elif event["type"] == "image":
-            total += event["duration"]
     return total
 
 

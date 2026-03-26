@@ -17,15 +17,13 @@ CHARACTER_X_LEFT = 80               # X position for left-side speaker
 CHARACTER_X_RIGHT = 600             # X position for right-side speaker
 
 # ── Subtitles ────────────────────────────────────────────────────────────────
-SUBTITLE_Y = 1150                   # Y position of subtitle text block
+SUBTITLE_Y = 60                     # Y position of subtitle text block (top of frame)
 SUBTITLE_FONT = "assets/fonts/bold.ttf"
-SUBTITLE_FONT_SIZE = 72
-SUBTITLE_COLOR = (255, 255, 255)            # inactive word color (white)
+SUBTITLE_FONT_SIZE = 120
+SUBTITLE_COLOR = (255, 255, 255)            # word color (white)
 SUBTITLE_HIGHLIGHT_COLOR = (255, 220, 0)    # active word color (yellow)
-SUBTITLE_MAX_WIDTH = 960                    # max px width before wrapping
-SUBTITLE_BG_ALPHA = 160                     # 0-255 alpha for background rect
-SUBTITLE_BG_PADDING = 20                    # px padding around text block
-SUBTITLE_LINE_SPACING = 10                  # extra px between wrapped lines
+SUBTITLE_STROKE_WIDTH = 6                   # black outline thickness in pixels
+SUBTITLE_WORDS_PER_CHUNK = 3               # max words shown at once
 
 # ── Graph / image overlays ────────────────────────────────────────────────────
 GRAPH_PADDING = 60                  # horizontal padding on each side
@@ -40,11 +38,12 @@ CHARACTERS_DIR = "assets/characters/"
 AUDIO_DIR = "assets/audio/"
 
 # ── Audio ─────────────────────────────────────────────────────────────────────
-AUDIO_EXT = "wav"           # file extension for audio files (wav when using Voicebox)
+AUDIO_EXT = "mp3"           # file extension for audio files
+AUDIO_TAIL_PADDING = 0.15   # seconds of silence kept after the last spoken word
 
 # ── Whisper ───────────────────────────────────────────────────────────────────
 WHISPER_MODEL = "base"              # tiny | base | small | medium | large
 
 # ── Voicebox TTS ──────────────────────────────────────────────────────────────
-VOICEBOX_URL = "http://localhost:8000"   # base URL of the local Voicebox server
+VOICEBOX_URL = "http://localhost:17493"  # base URL of the local Voicebox server
 # Voice profiles are matched to characters by name — no manual mapping needed.

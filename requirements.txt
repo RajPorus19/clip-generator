@@ -1,0 +1,5 @@
+moviepy
+numpy
+Pillow
+openai-whisper
+imageio-ffmpeg
