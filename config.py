@@ -6,6 +6,7 @@ All render.py, parse.py, and align.py values come from here.
 # ── Output ──────────────────────────────────────────────────────────────────
 RESOLUTION = (1080, 1920)   # (width, height)
 FPS = 30
+ENCODE_THREADS = 16         # FFmpeg threads for export (set to your CPU core count)
 
 # ── Background ───────────────────────────────────────────────────────────────
 BACKGROUND_CROP = "center"          # crop landscape gameplay to vertical center

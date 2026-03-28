@@ -10,12 +10,53 @@ Usage:
     timeline = parse_script("scripts/episode1.md")
 """
 
+import hashlib
 import re
 import sys
+import urllib.parse
+import urllib.request
 from pathlib import Path
 from typing import Any
 
 import config
+
+# ── Web image cache ───────────────────────────────────────────────────────────
+
+_WEB_IMAGE_CACHE_DIR = Path(config.CACHE_DIR) / "web_images"
+
+
+def _download_web_image(url: str) -> Path | None:
+    """Download a web image URL to the local cache and return its path.
+
+    Uses a hash of the URL as the filename so repeated parses of the same
+    script never re-download the same file.
+
+    Args:
+        url: HTTP/HTTPS URL to the image.
+
+    Returns:
+        Local Path to the cached file, or None on failure.
+    """
+    _WEB_IMAGE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Preserve the original extension if present; fall back to .png
+    parsed_path = urllib.parse.urlparse(url).path
+    suffix = Path(parsed_path).suffix.lower() or ".png"
+    url_hash = hashlib.sha256(url.encode()).hexdigest()[:16]
+    local_path = _WEB_IMAGE_CACHE_DIR / f"{url_hash}{suffix}"
+
+    if local_path.exists():
+        print(f"[parse] Web image cache hit: {local_path}")
+        return local_path
+
+    print(f"[parse] Downloading web image: {url}")
+    try:
+        urllib.request.urlretrieve(url, local_path)  # noqa: S310
+        print(f"[parse] Saved to: {local_path}")
+        return local_path
+    except Exception as exc:
+        print(f"[parse] WARNING: failed to download {url!r} — {exc}")
+        return None
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -110,7 +151,14 @@ def _parse_image_event(
     file_rel = match.group("file")
     duration = float(match.group("duration"))
 
-    if resolve_asset_path(file_rel) is None:
+    # Download web images and replace with a local cache path
+    if file_rel.startswith(("http://", "https://")):
+        local = _download_web_image(file_rel)
+        if local is None:
+            print(f"[parse] WARNING line {lineno}: could not download web image — {file_rel}")
+        else:
+            file_rel = str(local)
+    elif resolve_asset_path(file_rel) is None:
         print(f"[parse] WARNING line {lineno}: image file not found — {file_rel}")
 
     return {"type": "image", "file": file_rel, "duration": duration}

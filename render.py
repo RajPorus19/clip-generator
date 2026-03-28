@@ -495,11 +495,9 @@ def render(script_path: str, output_path: str | None = None) -> None:
             fps=config.FPS,
             codec="libx264",
             audio_codec="aac",
-            preset="medium",
-            ffmpeg_params=[
-                "-vf", "scale=1080:1920",
-                "-movflags", "+faststart",
-            ],
+            preset="ultrafast",
+            threads=config.ENCODE_THREADS,
+            ffmpeg_params=["-movflags", "+faststart"],
             logger="bar",
         )
 

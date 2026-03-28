@@ -214,3 +214,12 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# clip-generator — generated outputs and large binary assets
+output/
+cache/
+pictures/
+assets/audio/
+assets/backgrounds/
+assets/characters/
+assets/fonts/
